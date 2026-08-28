@@ -6,8 +6,8 @@ NEXTBIKE_URL = "https://api.nextbike.net/maps/nextbike-live.json"
 BERLIN_CITY_ID = 362
 
 
-def fetch_raw_nextbike_data(city_id: int = BERLIN_CITY_ID) -> dict:
-  response = requests.get(NEXTBIKE_URL, params={"city": city_id}, timeout=10)
+def fetch_raw_nextbike_data(URL: str, city_id: int = BERLIN_CITY_ID) -> dict:
+  response = requests.get(URL, params={"city": city_id}, timeout=10)
   response.raise_for_status()
   return response.json()
 
@@ -38,7 +38,7 @@ def extract_places_data(places_data: list, fetched_at: str) -> list:
 def main():
   fetched_at = datetime.now(timezone.utc).isoformat()  # one timestamp shared by this whole poll
 
-  raw_nextbike_data = fetch_raw_nextbike_data()
+  raw_nextbike_data = fetch_raw_nextbike_data(NEXTBIKE_URL, BERLIN_CITY_ID)
 
   city_data = extract_cities_data(raw_nextbike_data["countries"][0]["cities"][0], fetched_at)
   places_data = extract_places_data(raw_nextbike_data["countries"][0]["cities"][0]["places"], fetched_at)

@@ -5,3 +5,13 @@ __pycache__/
 *.tfstate
 *.tfstate.backup
 .DS_Store
+.venv/
+
+# Kafka broker data volumes (bind-mounted, host-local state)
+kafka1/
+kafka2/
+kafka3/
+
+# Local raw data landing zone / test dumps
+data/
+nextbike_sample.json

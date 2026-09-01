@@ -24,7 +24,7 @@ def extract_cities_data(city_data: dict, fetched_at: str) -> dict:
 def extract_places_data(places_data: list, fetched_at: str) -> list:
   PLACE_FIELDS = ["uid", "lat", "lng", "name", "booked_bikes", "bikes", "bikes_available_to_rent",
                   "active_place", "bike_racks", "free_racks", "special_racks", "free_special_racks",
-                  "maintenance", "terminal_type", "place_type", "rack_locks"]
+                  "maintenance", "terminal_type", "place_type", "rack_locks", "spot"]
 
   extracted_places = []
   for place in places_data:

@@ -1,5 +1,6 @@
 import json
 from confluent_kafka import Consumer, KafkaError
+import boto3
 
 c = Consumer({
   'bootstrap.servers': 'localhost:9094',
@@ -22,6 +23,11 @@ FIELD_WIDTHS = {
   "rack_locks": 8,
 }
 
+list_of_places = []
+
+fetched_at_marker = ""
+
+
 header = (
   f"{'Station Name':<{FIELD_WIDTHS['name']}} | "
   f"{'Booked':<{FIELD_WIDTHS['booked_bikes']}} | "
@@ -36,6 +42,11 @@ header = (
 )
 print(header)
 print("-" * len(header))
+
+
+def send_batch_to_s3(places, fetched_at):
+
+  pass
 
 try:
   while True:
@@ -64,9 +75,26 @@ try:
           f"{str(place_data.get('maintenance')):<{FIELD_WIDTHS['maintenance']}} | "
           f"{str(place_data.get('rack_locks')):<{FIELD_WIDTHS['rack_locks']}}"
         )
-        print(row)
+        # print(row)
+
+        fetched_at = place_data.get('fetched_at')
+        
+
+        if fetched_at == fetched_at_marker:
+          list_of_places.append(place_data)
+        else:
+          if list_of_places:
+            print(f"--- Batch complete: {len(list_of_places)} places, fetched_at={fetched_at_marker} -> send to S3 ---")
+            send_batch_to_s3(list_of_places, fetched_at_marker)
+
+          list_of_places = []
+          fetched_at_marker = fetched_at
+
+
       except json.JSONDecodeError:
         print(f"Skipping non-JSON message: {msg.value()}")
 finally:
+  if list_of_places:
+    print(f"--- Final flush: {len(list_of_places)} places, fetched_at={fetched_at_marker} -> send to S3 ---")
   c.close()
   print("Consumer closed cleanly.")

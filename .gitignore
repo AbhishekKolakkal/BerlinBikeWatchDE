@@ -6,7 +6,7 @@ __pycache__/
 *.tfstate.backup
 .DS_Store
 .venv/
-
+.credentials
 # Kafka broker data volumes (bind-mounted, host-local state)
 kafka1/
 kafka2/

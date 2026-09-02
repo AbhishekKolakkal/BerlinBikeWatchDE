@@ -9,7 +9,7 @@ from confluent_kafka import Producer
 
 NEXTBIKE_URL = "https://api.nextbike.net/maps/nextbike-live.json"
 BERLIN_CITY_ID = 362
-POLL_INTERVAL_SECONDS = 5
+POLL_INTERVAL_SECONDS = 10
 
 
 def iterate_through_places_data_and_send_to_kafka(producer,places_data):

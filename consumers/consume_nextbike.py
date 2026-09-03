@@ -54,25 +54,19 @@ def send_batch_to_s3(places, fetched_at):
 
   parsed = datetime.fromisoformat(fetched_at)
 
-
-  now = datetime.now(timezone.utc)
-
   today = parsed.date().isoformat()
   hour = parsed.strftime("%H")
-  filename = parsed.strftime("%Y%m%dT%H%M%SZ") + ".json"
+  filename = parsed.strftime("%Y%m%dT%H%M%SZ") + ".jsonl"
 
   key = f"bike_stations/dt={today}/hour={hour}/{filename}"
 
-  record = {
-      "places": places
-    }
+  jsonl_body = "\n".join(json.dumps(place) for place in places)
 
   s3.put_object(
     Bucket="berlinbikewatch-raw",
     Key=key,
-    Body=json.dumps(record).encode("utf-8")
+    Body=jsonl_body.encode("utf-8")
   )
-
   
 
 

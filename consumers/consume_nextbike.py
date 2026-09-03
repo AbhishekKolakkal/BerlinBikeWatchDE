@@ -1,6 +1,12 @@
 import json
 from confluent_kafka import Consumer, KafkaError
 import boto3
+from datetime import datetime, timezone, date
+from pathlib import Path
+
+
+session = boto3.Session(profile_name="berlinbikewatch")
+s3 = session.client("s3")
 
 c = Consumer({
   'bootstrap.servers': 'localhost:9094',
@@ -46,7 +52,29 @@ print("-" * len(header))
 
 def send_batch_to_s3(places, fetched_at):
 
-  pass
+  parsed = datetime.fromisoformat(fetched_at)
+
+
+  now = datetime.now(timezone.utc)
+
+  today = parsed.date().isoformat()
+  hour = parsed.strftime("%H")
+  filename = parsed.strftime("%Y%m%dT%H%M%SZ") + ".json"
+
+  key = f"bike_stations/dt={today}/hour={hour}/{filename}"
+
+  record = {
+      "places": places
+    }
+
+  s3.put_object(
+    Bucket="berlinbikewatch-raw",
+    Key=key,
+    Body=json.dumps(record).encode("utf-8")
+  )
+
+  
+
 
 try:
   while True:
@@ -96,5 +124,6 @@ try:
 finally:
   if list_of_places:
     print(f"--- Final flush: {len(list_of_places)} places, fetched_at={fetched_at_marker} -> send to S3 ---")
+    send_batch_to_s3(list_of_places, fetched_at_marker)
   c.close()
   print("Consumer closed cleanly.")

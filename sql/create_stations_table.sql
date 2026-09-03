@@ -1,0 +1,21 @@
+CREATE TABLE stations (
+  uid                     INTEGER,
+  lat                     DECIMAL(9,6),
+  lng                     DECIMAL(9,6),
+  name                    VARCHAR(200),
+  booked_bikes            INTEGER,
+  bikes                   INTEGER,
+  bikes_available_to_rent INTEGER,
+  active_place            INTEGER,
+  bike_racks              INTEGER,
+  free_racks              INTEGER,
+  special_racks           INTEGER,
+  free_special_racks      INTEGER,
+  maintenance             BOOLEAN,
+  terminal_type           VARCHAR(50),
+  place_type              VARCHAR(20),
+  rack_locks              BOOLEAN,
+  spot                    BOOLEAN,
+  fetched_at              TIMESTAMPTZ,
+  PRIMARY KEY (uid, fetched_at)
+);

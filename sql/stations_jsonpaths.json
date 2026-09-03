@@ -1,0 +1,22 @@
+{
+  "jsonpaths": [
+    "$.places[*].uid",
+    "$.places[*].lat",
+    "$.places[*].lng",
+    "$.places[*].name",
+    "$.places[*].booked_bikes",
+    "$.places[*].bikes",
+    "$.places[*].bikes_available_to_rent",
+    "$.places[*].active_place",
+    "$.places[*].bike_racks",
+    "$.places[*].free_racks",
+    "$.places[*].special_racks",
+    "$.places[*].free_special_racks",
+    "$.places[*].maintenance",
+    "$.places[*].terminal_type",
+    "$.places[*].place_type",
+    "$.places[*].rack_locks",
+    "$.places[*].spot",
+    "$.places[*].fetched_at"
+  ]
+}

@@ -6,7 +6,7 @@ from pathlib import Path
 
 NEXTBIKE_URL = "https://api.nextbike.net/maps/nextbike-live.json"
 BERLIN_CITY_ID = 362
-POLL_INTERVAL_SECONDS = 5
+POLL_INTERVAL_SECONDS = 300
 
 """
 doubts

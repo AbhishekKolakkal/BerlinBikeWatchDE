@@ -45,3 +45,17 @@ services:
       - kafka1
     networks:
       - kafka-net
+
+  postgres:
+    image: postgres:16
+    container_name: bbw-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: bbw_user
+      POSTGRES_PASSWORD: bbw_password
+      POSTGRES_DB: bbw_metadata
+    volumes:
+      - ./postgres/data:/var/lib/postgresql/data
+    networks:
+      - kafka-net

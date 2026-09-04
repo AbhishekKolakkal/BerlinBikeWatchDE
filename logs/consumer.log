@@ -186,3 +186,7 @@ Station Name                                  | Booked   | Bikes  | Available  |
 --- Batch complete: 1048 places, fetched_at=2026-09-04T13:38:30.658871+00:00 -> send to S3 ---
 --- Batch complete: 1048 places, fetched_at=2026-09-04T13:38:41.101610+00:00 -> send to S3 ---
 --- Batch complete: 1048 places, fetched_at=2026-09-04T13:38:51.572595+00:00 -> send to S3 ---
+--- Batch complete: 1048 places, fetched_at=2026-09-04T13:39:01.941920+00:00 -> send to S3 ---
+--- Batch complete: 1048 places, fetched_at=2026-09-04T13:39:12.347812+00:00 -> send to S3 ---
+--- Batch complete: 1048 places, fetched_at=2026-09-04T13:39:22.733938+00:00 -> send to S3 ---
+--- Batch complete: 1048 places, fetched_at=2026-09-04T13:39:33.114368+00:00 -> send to S3 ---

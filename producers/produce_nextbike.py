@@ -4,12 +4,16 @@ from fetch_nextbike import fetch_raw_nextbike_data, extract_cities_data, extract
 import time
 from pathlib import Path
 
+import os
+from dotenv import load_dotenv
+
 from confluent_kafka import Producer
 
+load_dotenv()
 
 NEXTBIKE_URL = "https://api.nextbike.net/maps/nextbike-live.json"
 BERLIN_CITY_ID = 362
-POLL_INTERVAL_SECONDS = 10
+POLL_INTERVAL_SECONDS = 300
 
 
 def iterate_through_places_data_and_send_to_kafka(producer,places_data):
@@ -23,7 +27,7 @@ def iterate_through_places_data_and_send_to_kafka(producer,places_data):
 
 def main():
 
-  p = Producer({'bootstrap.servers': 'localhost:9094'})
+  p = Producer({'bootstrap.servers': os.environ['KAFKA_BOOTSTRAP_SERVERS']})
 
 
   while True:

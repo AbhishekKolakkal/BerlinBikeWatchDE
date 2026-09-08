@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 load_dotenv()
 
-POLL_INTERVAL_SECONDS = 10
+POLL_INTERVAL_SECONDS = 300
 
 S3_BUCKET = "berlinbikewatch-raw"
 S3_PREFIX = "bike_stations/"
@@ -36,7 +36,7 @@ REDSHIFT_CONFIG = {
     "password": os.environ["REDSHIFT_PASSWORD"],
 }
 
-session = boto3.Session(profile_name="berlinbikewatch")
+session = boto3.Session()
 s3 = session.client("s3")
 
 redshift_conn = redshift_connector.connect(**REDSHIFT_CONFIG)

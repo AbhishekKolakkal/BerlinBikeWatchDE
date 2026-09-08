@@ -3,13 +3,16 @@ from confluent_kafka import Consumer, KafkaError
 import boto3
 from datetime import datetime, timezone, date
 from pathlib import Path
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
 
-session = boto3.Session(profile_name="berlinbikewatch")
+session = boto3.Session()
 s3 = session.client("s3")
 
 c = Consumer({
-  'bootstrap.servers': 'localhost:9094',
+  'bootstrap.servers': os.environ['KAFKA_BOOTSTRAP_SERVERS'],
   'group.id': 'bike_stations_consumer',
   'auto.offset.reset': 'earliest'
 })

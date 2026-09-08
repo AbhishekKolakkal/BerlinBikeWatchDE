@@ -1,0 +1,9 @@
+postgres/
+kafka1/
+logs/
+.venv/
+.git/
+data/
+__pycache__/
+*.pyc
+.env

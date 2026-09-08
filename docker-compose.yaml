@@ -59,3 +59,39 @@ services:
       - ./postgres/data:/var/lib/postgresql/data
     networks:
       - kafka-net
+
+  producer:
+    image: bbw-app
+    container_name: bbw-producer
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka1:9092
+    command: uv run producers/produce_nextbike.py
+    depends_on:
+      - kafka1
+    networks:
+      - kafka-net
+
+  consumer:
+    image: bbw-app
+    container_name: bbw-consumer
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka1:9092
+    command: uv run consumers/consume_nextbike.py
+    depends_on:
+      - kafka1
+    networks:
+      - kafka-net
+
+  loader:
+    image: bbw-app
+    container_name: bbw-loader
+    env_file: .env
+    environment:
+      POSTGRES_HOST: bbw-postgres
+    command: uv run loaders/load_to_redshift.py
+    depends_on:
+      - postgres
+    networks:
+      - kafka-net

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import os
 from dotenv import load_dotenv
+import requests
 
 from confluent_kafka import Producer
 
@@ -34,7 +35,12 @@ def main():
     fetched_at = datetime.now(timezone.utc).isoformat()
     print(fetched_at)
 
-    raw_nextbike_data = fetch_raw_nextbike_data(NEXTBIKE_URL, BERLIN_CITY_ID)
+    try:
+      raw_nextbike_data = fetch_raw_nextbike_data(NEXTBIKE_URL, BERLIN_CITY_ID)
+    except requests.exceptions.RequestException as e:
+      print(f"Poll failed: {e}")
+      time.sleep(POLL_INTERVAL_SECONDS)
+      continue
 
     city_data = extract_cities_data(raw_nextbike_data["countries"][0]["cities"][0], fetched_at)
 

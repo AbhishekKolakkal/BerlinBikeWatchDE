@@ -5,6 +5,7 @@
 4. Adding more data
 - non places - after doing some analysis of current data
 - bike list - 
+5. on 8th sept the producer was down for an hour and I was not knowing it, right now there is a try catch block but this will not be enough, we needed a mechanism that will give alert to me if any service is down.
 
 
 ### Fixes

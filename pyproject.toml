@@ -11,4 +11,5 @@ dependencies = [
     "python-dotenv>=1.2.3",
     "redshift-connector>=2.1.16",
     "requests>=2.34.2",
+    "streamlit>=1.63.0",
 ]

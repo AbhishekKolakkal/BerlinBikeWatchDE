@@ -15,9 +15,9 @@
 
 with the current system I can get
 1. Anomaly detection
-2. dead Station
+2. dead Station - done
 3. how many stations are in maintenance mode
-4. Busiest / quietest stations — rank stations by average bikes_available_to_rent, or by how often they hit zero, or by variance (how much their count fluctuates — a station that's always near-empty is different from one that swings wildly)
+4. Busiest / quietest stations — rank stations by average bikes_available_to_rent, or by how often they hit zero, or by variance (how much their count fluctuates — a station that's always near-empty is different from one that swings wildly) - done
 5. Time-of-day demand patterns — group by EXTRACT(hour FROM fetched_at) per station, revealing rush-hour signatures (e.g., "this station empties every morning around 8am, refills around 6pm")
 8. Rebalancing candidates — stations that are consistently full (high bikes, low free_racks) paired with stations consistently empty — a real operational insight (nextbike/Berlin would want to move bikes from the first group to the second)
 11. Rack capacity utilization — bikes / bike_racks as a ratio, per station, showing which stations are chronically over- or under-provisioned relative to their physical size

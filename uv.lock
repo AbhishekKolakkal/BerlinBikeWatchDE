@@ -83,6 +83,7 @@ dependencies = [
     { name = "redshift-connector" },
     { name = "requests" },
     { name = "streamlit" },
+    { name = "tzdata" },
 ]
 
 [package.metadata]
@@ -95,6 +96,7 @@ requires-dist = [
     { name = "redshift-connector", specifier = ">=2.1.16" },
     { name = "requests", specifier = ">=2.34.2" },
     { name = "streamlit", specifier = ">=1.63.0" },
+    { name = "tzdata", specifier = ">=2026.3" },
 ]
 
 [[package]]

@@ -6,6 +6,7 @@
 - non places - after doing some analysis of current data
 - bike list - 
 5. on 8th sept the producer was down for an hour and I was not knowing it, right now there is a try catch block but this will not be enough, we needed a mechanism that will give alert to me if any service is down.
+14. RAG-style Q&A over your whole project — combine several of the above (SQL queries, field docs, README) into one vector store, and build a small "ask a question about BerlinBikeWatch, get an answer grounded in the actual project" tool — this is genuinely the most "industry-relevant" vector DB pattern right now (retrieval-augmented generation), and it's built entirely from documentation you already have.
 
 
 ### Fixes
@@ -21,3 +22,4 @@ with the current system I can get
 5. Time-of-day demand patterns — group by EXTRACT(hour FROM fetched_at) per station, revealing rush-hour signatures (e.g., "this station empties every morning around 8am, refills around 6pm")
 8. Rebalancing candidates — stations that are consistently full (high bikes, low free_racks) paired with stations consistently empty — a real operational insight (nextbike/Berlin would want to move bikes from the first group to the second)
 11. Rack capacity utilization — bikes / bike_racks as a ratio, per station, showing which stations are chronically over- or under-provisioned relative to their physical size
+

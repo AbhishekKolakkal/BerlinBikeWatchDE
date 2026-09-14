@@ -199,6 +199,56 @@ GROUP BY sc.uid, s.name
 HAVING COUNT(DISTINCT sc.status) = 1;
 """
 
+INTEGRITY_SQL = """
+SELECT
+    COUNT(*) AS total_rows,
+    COUNT(DISTINCT fetched_at) AS distinct_polls,
+    COUNT(*)::FLOAT / COUNT(DISTINCT fetched_at) AS rows_per_poll,
+    MIN(fetched_at) AS earliest_poll,
+    MAX(fetched_at) AS latest_poll
+FROM stations;
+"""
+
+GAPS_SQL = """
+WITH poll_gaps AS (
+    SELECT
+        fetched_at,
+        LAG(fetched_at) OVER (ORDER BY fetched_at) AS previous_fetched_at
+    FROM (SELECT DISTINCT fetched_at FROM stations) t
+)
+SELECT
+    previous_fetched_at,
+    fetched_at,
+    EXTRACT(EPOCH FROM (fetched_at - previous_fetched_at)) / 60 AS gap_minutes
+FROM poll_gaps
+WHERE EXTRACT(EPOCH FROM (fetched_at - previous_fetched_at)) / 60 > 6
+ORDER BY gap_minutes DESC
+LIMIT 10;
+"""
+
+# Manually maintained — not queried from the database. Append a new entry after each real incident.
+INCIDENTS = [
+  {
+    "date": "2026-09-08",
+    "duration": "1h 46m",
+    "component": "Producer (NextBike API polling)",
+    "root_cause": (
+      "Unhandled requests.exceptions.ConnectTimeout when NextBike's API failed to respond "
+      "within the 10s timeout window. No retry/error handling existed around the fetch call, "
+      "so the exception propagated and crashed the entire producer process."
+    ),
+    "fix": (
+      "Added a try/except around the fetch call with logging and a continue statement, so a "
+      "single failed poll is skipped and logged rather than crashing the process. Rebuilt and "
+      "redeployed the container."
+    ),
+    "follow_up": (
+      "Planned: add Docker restart: unless-stopped policy so any future unhandled crash "
+      "triggers an automatic restart rather than requiring manual intervention."
+    ),
+  },
+]
+
 
 # ---------------------------------------------------------------------------
 # Row selection -> focused station
@@ -241,6 +291,8 @@ latest_df, latest_err = try_query(LATEST_FETCH_SQL)
 anomalies, anomalies_err = try_query(ANOMALIES_SQL)
 busiest, busiest_err = try_query(BUSIEST_SQL)
 dead, dead_err = try_query(DEAD_SQL)
+integrity_df, integrity_err = try_query(INTEGRITY_SQL)
+gaps, gaps_err = try_query(GAPS_SQL)
 
 if latest_err:
   st.caption(f"⚠️ Warehouse freshness unknown: {latest_err}")
@@ -342,8 +394,9 @@ st.divider()
 st.caption("Click a row in any table below to focus that station on the map.")
 
 # --- Tiles 2-4: history from Redshift -------------------------------------
-tab_anom, tab_busy, tab_dead = st.tabs(
-  ["Recent anomalies", "Busiest stations", "Dead stations (24h)"]
+tab_anom, tab_busy, tab_dead, tab_health = st.tabs(
+  ["Recent anomalies", "Busiest stations", "Dead stations (24h)", "Pipeline Health"],
+  default="Pipeline Health",
 )
 
 with tab_anom:
@@ -383,3 +436,67 @@ with tab_dead:
   else:
     st.write(f"{len(dead):,} station(s) with no activity:")
     history_table(dead, ["name", "uid"], "dead_table")
+
+with tab_health:
+  st.subheader("Data integrity check")
+  if integrity_err:
+    st.error(f"Redshift query failed: {integrity_err}")
+  else:
+    row = integrity_df.iloc[0]
+    rows_per_poll = float(row["rows_per_poll"])
+    earliest = pd.to_datetime(row["earliest_poll"], utc=True).tz_convert(BERLIN_TZ)
+    latest = pd.to_datetime(row["latest_poll"], utc=True).tz_convert(BERLIN_TZ)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Rows", f"{int(row['total_rows']):,}")
+    c2.metric("Distinct Polls", f"{int(row['distinct_polls']):,}")
+    c3.metric("Rows per Poll", f"{rows_per_poll:.1f}")
+    c4.metric("Date Range", f"{earliest:%Y-%m-%d} → {latest:%Y-%m-%d}")
+
+    st.caption(
+      "Rows per poll should be a clean, consistent number (~1048, the count of real NextBike "
+      "stations). This is a live self-check: if duplicate loads had occurred, this number would "
+      "show drift."
+    )
+    if 1040 <= rows_per_poll <= 1060:
+      st.success(f"✅ Consistent — {rows_per_poll:.1f} rows per poll, no signs of duplicate loads.")
+    else:
+      st.warning(
+        f"⚠️ Rows per poll ({rows_per_poll:.1f}) is outside the expected 1040–1060 range — "
+        f"possible duplicate or missing data."
+      )
+
+  st.divider()
+  st.subheader("Uptime & gap history")
+  st.caption(
+    "Gaps above ~6 minutes indicate the pipeline was not actively polling (expected interval "
+    "is 5 minutes). These are shown transparently, not hidden."
+  )
+  if gaps_err:
+    st.error(f"Redshift query failed: {gaps_err}")
+  elif gaps.empty:
+    st.info("No gaps over 6 minutes found — polling has been continuous.")
+  else:
+    gaps_display = pd.DataFrame({
+      "Gap Start": utc_to_berlin(gaps["previous_fetched_at"]),
+      "Gap End": utc_to_berlin(gaps["fetched_at"]),
+      "Duration (minutes)": gaps["gap_minutes"].round(1),
+    })
+    st.dataframe(gaps_display, hide_index=True, width="stretch")
+
+  if not integrity_err:
+    total_minutes = (latest - earliest).total_seconds() / 60
+    expected_polls = max(total_minutes / 5, 1)
+    actual_polls = int(row["distinct_polls"])
+    uptime_pct = min(actual_polls / expected_polls * 100, 100)
+    st.metric("Uptime (over the loaded history)", f"{uptime_pct:.1f}%")
+
+  st.divider()
+  st.subheader("Incident log")
+  for incident in INCIDENTS:
+    with st.expander(
+      f"{incident['date']} — {incident['component']} ({incident['duration']})"
+    ):
+      st.markdown(f"**Root cause:** {incident['root_cause']}")
+      st.markdown(f"**Fix:** {incident['fix']}")
+      st.markdown(f"**Follow-up:** {incident['follow_up']}")

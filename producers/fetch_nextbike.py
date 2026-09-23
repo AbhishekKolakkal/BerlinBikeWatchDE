@@ -1,9 +1,17 @@
 import json
+import socket
 import requests
+import urllib3.util.connection as urllib3_cn
 from datetime import datetime, timezone
 
 NEXTBIKE_URL = "https://api.nextbike.net/maps/nextbike-live.json"
 BERLIN_CITY_ID = 362
+
+
+def allowed_gai_family():
+    return socket.AF_INET  # force IPv4 only, avoids broken IPv6 route in this environment
+
+urllib3_cn.allowed_gai_family = allowed_gai_family
 
 
 def fetch_raw_nextbike_data(URL: str, city_id: int = BERLIN_CITY_ID) -> dict:

@@ -222,7 +222,7 @@ SELECT
     EXTRACT(EPOCH FROM (fetched_at - previous_fetched_at)) / 60 AS gap_minutes
 FROM poll_gaps
 WHERE EXTRACT(EPOCH FROM (fetched_at - previous_fetched_at)) / 60 > 6
-ORDER BY gap_minutes DESC
+ORDER BY fetched_at
 LIMIT 10;
 """
 
@@ -282,8 +282,15 @@ def history_table(df: pd.DataFrame, columns: list[str], table_key: str) -> None:
 # UI
 # ---------------------------------------------------------------------------
 
+GITHUB_URL = "https://github.com/AbhishekKolakkal/BerlinBikeWatchDE"
+
 st.set_page_config(page_title="BerlinBikeWatch", layout="wide")
-st.title("BerlinBikeWatch")
+
+title_col, link_col = st.columns([5, 1], vertical_alignment="center")
+with title_col:
+  st.title("BerlinBikeWatch")
+with link_col:
+  st.link_button("💻 View source on GitHub", GITHUB_URL, type="primary", width="stretch")
 
 focused = st.session_state.get("focused")
 

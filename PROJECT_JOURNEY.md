@@ -201,3 +201,64 @@ Also identified, not yet done: `restart: unless-stopped` on all Docker Compose s
 - Surge detection currently cannot reliably distinguish operational rebalancing from genuine demand without further refinement (e.g. a station-relative rolling baseline rather than a fixed threshold).
 - Event correlation is not yet real — the Kulturdaten investigation found genuine data and API limitations that need dedicated infrastructure (Phases 1–2 above) before it can move past manual, one-off verification.
 - Free-floating bike data (individual `bike_list[]` tracking, ghost-bike detection) was deliberately scoped out of the current build and remains a legitimate but separate future direction, not pursued further to keep focus on the core anomaly-correlation narrative.
+
+## 10. Incident: Loader Crash and a Configuration Regression (Sept 18–23)
+
+This section documents a second real production incident, genuinely more informative than the first, because it surfaced not just a code bug but a **configuration regression** — settings that had been correctly added earlier, then silently lost during later edits.
+
+### 10.1 The crash
+
+On **2026-09-18**, the loader crashed with:
+```
+redshift_connector.error.InterfaceError: BrokenPipe: server socket closed. Please check
+that client side networking configurations such as Proxies, firewalls, VPN, etc. are not
+affecting your network connection.
+```
+
+**Root cause:** the loader opens a single Redshift connection at container startup and reuses it indefinitely across every poll cycle. A long-lived connection eventually had its underlying TCP socket closed — either by Redshift Serverless server-side, or by a silent drop somewhere in the network path. This is a well-understood, expected failure mode for long-lived database connections; it was a known, deferred risk flagged earlier in the project ("a connection left open for a very long time can occasionally drop") that had not yet been addressed.
+
+There was no `try/except` around the `COPY` execution, so this single dropped connection crashed the entire container. Because `restart: unless-stopped` had **not** been applied to the `loader` service (only `dashboard` had it, from an earlier partial fix), the container sat dead — **for five full days** — before being noticed.
+
+### 10.2 The fix
+
+- Wrapped `load_file_to_redshift` in a `try/except`: on any execution failure, reconnect to Redshift (`get_redshift_connection()`) and retry the same `COPY` once before giving up.
+- Kept the earlier per-file `try/except` (from the deleted-S3-file incident) so one bad file doesn't halt the batch.
+- Added an outer, loop-level `try/except` in `main()` as a final safety net, so a genuinely unrecoverable error (e.g. Postgres itself unreachable) logs and waits for the next cycle rather than crashing the container.
+
+### 10.3 The recovery — validating the pointer design under real failure
+
+Before redeploying, the Postgres `load_pointer` value was checked directly:
+```sql
+SELECT * FROM load_pointer;
+-- 2026-09-18 01:08:28+00
+```
+This confirmed the pointer was sitting exactly where the crash occurred, untouched by the five days of downtime. **No manual reset was performed.** After redeploying the fixed image, the loader correctly found and began working through **1,552 backlogged files**, starting from the exact file it had failed on originally — not reprocessing anything already loaded, not skipping anything new.
+
+This is the first real-world validation of the pointer-based duplicate-prevention design under an actual multi-day outage, and it held up correctly: the simpler design choice (a single pointer, accepted at the time as less resilient than a per-file tracking table) proved sufficient for this failure mode, since the failure was a clean crash before any pointer update — not a partial, out-of-order, or corrupted state.
+
+### 10.4 A second, unrelated discovery: a configuration regression
+
+While diagnosing why the redeployed loader was producing no visible log output at all, two things were found to have been silently lost from `docker-compose.yaml` at some point during later, unrelated edits (most likely during the Traefik/domain-routing work in a previous session):
+
+- **`PYTHONUNBUFFERED: "1"`** — missing from `producer`, `consumer`, and `loader`. Without it, `print()` output sits in Python's internal buffer and never reaches `docker logs`, making the container appear silent even while doing real, correct work. This is the same buffering issue diagnosed and fixed earlier in the project (§3, initial local debugging) — it had simply regressed.
+- **`restart: unless-stopped`** — present only on `dashboard`, never actually added to `producer`, `consumer`, or `loader`, despite being identified as a clear, planned fix after the Sept 8 incident. This gap is what let the Sept 18 crash go unnoticed for five days instead of self-recovering within seconds.
+
+Both were reapplied to all four long-running services. This is a useful, honest lesson in its own right: **a fix that isn't captured in version-controlled configuration can silently disappear during unrelated future edits.** The correct fix wasn't just "add the setting" a second time — it's a prompt to keep `docker-compose.yaml` under source control (git) so changes like this are visible in diffs and reviewable, rather than being discovered only when a service goes silently dark.
+
+### 10.5 What this incident adds to the project's story
+
+Combined with the Sept 8 producer incident, this is now a second, independently-diagnosed production failure — a different root cause (dropped DB connection vs. API timeout), a different discovery path (empty logs, not a crashed container), and a genuine configuration-management lesson on top of the code fix. Together they form a real pattern worth stating plainly: **this pipeline has now survived two real production incidents, each correctly diagnosed from first principles (log inspection, direct database queries, systematic elimination of hypotheses) and each resulting in a durable fix, not a one-off patch.**
+
+---
+
+## 11. Next: Alerting and Monitoring
+
+Both incidents above shared the same root enabling factor: **nothing told me a service was down.** Discovery happened by chance (checking the dashboard, noticing stale data) rather than by design. This is the next concrete piece of infrastructure planned:
+
+**Scope, decided deliberately small to start:**
+- A lightweight, cron-scheduled script (not a new monitoring platform) checking two things:
+  1. **Container health** — are `producer`, `consumer`, `loader`, `kafka1`, `postgres`, and `dashboard` all in a running state?
+  2. **Data freshness** — is `MAX(fetched_at)` in Redshift within an expected threshold of "now" (catching a container that's technically running but silently stuck, which container-status checks alone would miss)?
+- Notification via a simple webhook (Telegram or Discord) — no new infrastructure beyond the script itself and a free bot/webhook.
+
+**Deliberately deferred:** a full Prometheus/Grafana/Alertmanager stack was considered and explicitly set aside for now, using the same reasoning applied earlier to Spark, dbt, and Snowflake — it's genuinely more powerful, but disproportionate to the current scale and would compete for focus with the still-open event-correlation phases (§8) rather than strengthening the core project narrative. It remains a reasonable future upgrade if the project's monitoring needs outgrow the simple version.

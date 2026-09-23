@@ -39,8 +39,13 @@ REDSHIFT_CONFIG = {
 session = boto3.Session()
 s3 = session.client("s3")
 
-redshift_conn = redshift_connector.connect(**REDSHIFT_CONFIG)
-redshift_cursor = redshift_conn.cursor()
+
+def get_redshift_connection():
+  conn = redshift_connector.connect(**REDSHIFT_CONFIG)
+  return conn, conn.cursor()
+
+
+redshift_conn, redshift_cursor = get_redshift_connection()
 
 pg_conn = psycopg2.connect(**POSTGRES_CONFIG)
 
@@ -88,6 +93,8 @@ def list_new_files(pointer):
 
 
 def load_file_to_redshift(key):
+  global redshift_conn, redshift_cursor
+
   s3_path = f"s3://{S3_BUCKET}/{key}"
   copy_sql = f"""
     COPY stations
@@ -96,29 +103,44 @@ def load_file_to_redshift(key):
     FORMAT AS JSON 'auto'
     TIMEFORMAT AS 'auto';
   """
-  redshift_cursor.execute(copy_sql)
-  redshift_conn.commit()
+
+  try:
+    redshift_cursor.execute(copy_sql)
+    redshift_conn.commit()
+  except Exception as e:
+    print(f"  Redshift connection error ({e}), reconnecting and retrying...")
+    redshift_conn, redshift_cursor = get_redshift_connection()
+    redshift_cursor.execute(copy_sql)
+    redshift_conn.commit()
 
 
 def main():
   while True:
-    pointer = get_pointer()
-    new_files = list_new_files(pointer)
+    try:
+      pointer = get_pointer()
+      new_files = list_new_files(pointer)
 
-    if new_files:
-      print(f"Found {len(new_files)} new file(s). Loading...")
-      latest_fetched_at = pointer
+      if new_files:
+        print(f"Found {len(new_files)} new file(s). Loading...")
+        latest_fetched_at = pointer
 
-      for key, file_fetched_at in new_files:
-        print(f"  Loading {key} ...")
-        load_file_to_redshift(key)
-        latest_fetched_at = max(latest_fetched_at, file_fetched_at)
-        print(f"  Loaded {key} successfully.")
+        for key, file_fetched_at in new_files:
+          try:
+            print(f"  Loading {key} ...")
+            load_file_to_redshift(key)
+            latest_fetched_at = max(latest_fetched_at, file_fetched_at)
+            print(f"  Loaded {key} successfully.")
+          except Exception as e:
+            print(f"  Failed to load {key}: {e}")
+            continue
 
-      update_pointer(latest_fetched_at)
-      print(f"Pointer updated to: {latest_fetched_at}")
-    else:
-      print("No new files. Waiting...")
+        update_pointer(latest_fetched_at)
+        print(f"Pointer updated to: {latest_fetched_at}")
+      else:
+        print("No new files. Waiting...")
+
+    except Exception as e:
+      print(f"Loop iteration failed: {e}")
 
     time.sleep(POLL_INTERVAL_SECONDS)
 

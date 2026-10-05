@@ -314,3 +314,78 @@ Every incident so far shared one root enabling factor: nothing notified anyone w
 ### 12.7 What this closes out
 
 Given today's timeline — Sept 8 (1h46m unnoticed), Sept 18 (5 days unnoticed), Sept 26 (4 days unnoticed) — this system, running from today forward, would have caught every one of those within 5 minutes instead of hours to days. This is the natural, necessary completion of the reliability work started with `restart: unless-stopped` and `try/except` fixes earlier in the project: those fixes let the pipeline recover automatically; this one ensures a human finds out promptly when automatic recovery isn't enough.
+
+13. Incident: Cryptominer Inside kafka-cluster-ui (Oct 5)
+13.1 How it was found
+
+This wasn't found by symptom — it was found while chasing disk space. The VPS's /var/lib showed 132G used, traced step by step: /var/lib/docker was only 221M, but /var/lib/containerd was 131G, and inside that, a single containerd snapshot (254) accounted for 120G by itself — almost the entire disk, inside one container's writable filesystem layer.
+
+Looking inside that snapshot: 80G under /tmp, 31G under /home/kafkaui. Neither belongs in a kafka-ui image. The file and folder names found there — .kworker, .kthread, .rcu, .udev, .systemd, .config, .cache, .local — are real Linux kernel thread names, and malware commonly disguises itself using exactly these names so it blends into a process or file listing without standing out. /home/kafkaui holding 2,011 entries doesn't match anything a Kafka UI container should be doing either. This pattern is consistent with a cryptominer running inside the container, not legitimate application activity.
+
+13.2 Root cause
+
+The original docker-compose.yaml bound several services with no address restriction at all:
+
+yaml
+ports:
+  - "8080:8080"   # kafka-ui
+  - "9092:9092"   # kafka1
+  - "9093:9093"
+  - "9094:9094"
+  - "5432:5432"   # postgres
+
+0.0.0.0 binding means "reachable from anywhere on the internet," not just from the operator. Kafka's own logs from the same day showed repeated connection attempts from external IPs (157.230.218.42, 137.184.64.184) against the Kafka controller port, sending malformed or wrong-version requests — independent confirmation the exposure was actively being probed, not just theoretically risky.
+
+This also reframed an earlier incident: the Sept 26 Kafka OOM kill (§12) had been attributed entirely to kafka-cluster-ui running at an unbounded 391% CPU from unbounded JVM heap growth. A cryptominer running inside that same container fits that CPU signature at least as well as a memory leak does. Which one actually caused the Sept 26 kill can't be confirmed retroactively — the container had already been removed before this was investigated — but it's no longer safe to call that incident's root cause settled.
+
+13.3 The fix
+
+Rather than just capping memory (which would limit the miner's ceiling but not stop it from running or reading container secrets), the actual exposure was closed: every affected service's ports were rebound to loopback only.
+
+yaml
+ports:
+  - "127.0.0.1:8080:8080"   # kafka-ui
+  - "127.0.0.1:9092:9092"   # kafka1
+  - "127.0.0.1:9093:9093"
+  - "127.0.0.1:9094:9094"
+  - "127.0.0.1:5432:5432"   # postgres
+
+This means these ports are no longer reachable from the public internet at all — not firewalled, not obscured, genuinely unreachable at the OS level — while every internal service (producer, consumer, loader) continues reaching Kafka and Postgres over the Docker-internal kafka-net network, which was never exposed to begin with. The compromised kafka-cluster-ui container was stopped, disconnected from the network, and not reused.
+
+13.4 Open item, honestly unresolved
+
+Whether anything was actually exfiltrated — specifically, whether the miner's process ever read or sent the .env file injected into that container (Postgres and Redshift credentials, AWS config) — could not be confirmed, because the container was already removed before this was investigated and no outbound-connection evidence survived. A Redshift connection-log check (sys_connection_log) showed only the expected IPs (Contabo's own, and the operator's laptop) for the windows checked so far, which is evidence against credential misuse via Redshift specifically, but is not exhaustive and does not cover Postgres or AWS directly. Credential rotation for Postgres, Redshift, and AWS has not yet been confirmed as done — only the Telegram bot token has been rotated so far (see §14). This remains the honest, open tail of this incident.
+
+14. Incident: Redshift Serverless Cost Spike — The Health Check Was the Cause
+14.1 The mechanism that made this non-obvious
+
+Redshift Serverless bills by active compute time, not by query count or complexity. It auto-pauses after a period of inactivity, and while paused, zero RPU-seconds accrue; once a query arrives, it resumes and starts billing again, with a minimum billing floor each time it wakes. This means a single cheap query run constantly is a worse cost pattern than a handful of expensive queries run occasionally — the warehouse never gets a long enough idle gap to actually stay paused.
+
+14.2 Root cause
+
+The pipeline health-check script (§12.6) includes a check_data_freshness check that queried Redshift directly:
+
+python
+cursor.execute("SELECT MAX(fetched_at) FROM stations;")
+
+Trivially cheap on its own. But the script runs via cron every 5 minutes, 288 times a day — meaning Redshift was being kept continuously or near-continuously active around the clock, independent of whether the dashboard was ever opened by anyone. The dashboard's own, heavier queries (LAG()-based window functions over the full stations table, uncached beyond 5 minutes) are usage-driven and bursty; this health check was constant and unconditional, and was the larger driver of the sustained cost increase.
+
+14.3 The fix
+
+check_data_freshness was rewritten to read the loader's existing Postgres load_pointer table instead of querying Redshift at all:
+
+python
+def check_data_freshness(pg_conn) -> tuple[bool, str]:
+  cur = pg_conn.cursor()
+  cur.execute("SELECT last_loaded_fetched_at FROM load_pointer;")
+  ...
+
+Since the loader only advances that pointer after a successful COPY, it's a reliable freshness proxy — same 5-minute cron cadence, zero Redshift connections from this script. The redshift_connector import and REDSHIFT_CONFIG block were removed entirely, and main() was updated to pass the Postgres connection into this one check specifically. The updated script was rebuilt into the shared bbw-app image, pushed to ECR, and confirmed live via the health-check log, which showed the wording change from "Latest data is 14 min old" (old, Redshift-based) to "Last loaded data is 9 min old" (new, Postgres-based) exactly at the point of redeploy.
+
+14.4 A second, unrelated fault found in the same pass
+
+While verifying this fix, Telegram alerting itself was found to be silently broken — a stale bot token in .env. send_telegram_alert() only prints a failure to the script's log on error rather than crashing, so this had been failing quietly for an unknown period with nothing surfacing it. The token was rotated and delivery confirmed with a direct sendMessage test before relying on it again.
+
+14.5 What this adds to the project's story
+
+This is the fourth genuinely distinct root cause found across this project's incidents — API timeout, dropped DB connection, unbounded JVM memory, and now a billing-model mismatch where the monitoring system itself was the cost driver it was built to help control. It's a useful, slightly uncomfortable lesson: the alerting system built in §12 to catch failures faster introduced a new failure mode of its own (cost, not downtime) that went unnoticed for an unknown period, precisely because nothing was watching spend the way everything else was watching uptime.

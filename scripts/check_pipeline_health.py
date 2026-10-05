@@ -15,12 +15,13 @@ Runs on the Contabo host directly (not containerized) — Check 1 needs `docker
 ps`, and running on the host avoids mounting the Docker socket into a
 container just for that.
 
-Three checks: container health (docker ps), data freshness (Redshift), and
-memory pressure (/proc/meminfo). State (healthy/unhealthy per check, last
-alert time) lives in a small Postgres table in the same `bbw_metadata`
-database already used for the loader's pointer, so a crashed/unhealthy check
-alerts once on failure, once on recovery, and otherwise reminds at most every
-REMINDER_INTERVAL_MINUTES while it stays down — not on every 5-minute tick.
+Three checks: container health (docker ps), data freshness (Postgres
+load_pointer), and memory pressure (/proc/meminfo). State (healthy/unhealthy
+per check, last alert time) lives in a small Postgres table in the same
+`bbw_metadata` database already used for the loader's pointer, so a
+crashed/unhealthy check alerts once on failure, once on recovery, and
+otherwise reminds at most every REMINDER_INTERVAL_MINUTES while it stays
+down — not on every 5-minute tick.
 """
 
 import os
@@ -28,7 +29,6 @@ import subprocess
 from datetime import datetime, timezone
 
 import psycopg2
-import redshift_connector
 import requests
 from dotenv import load_dotenv
 
@@ -46,15 +46,6 @@ EXPECTED_CONTAINERS = [
 STALENESS_THRESHOLD_MINUTES = 15   # pipeline polls every 5 min -> 3 missed polls
 MEMORY_THRESHOLD_GIB = 1.0         # the Kafka-UI OOM incident dropped available memory to ~0
 REMINDER_INTERVAL_MINUTES = 60     # re-alert at most this often while a check stays unhealthy
-
-REDSHIFT_CONFIG = {
-  "host": os.environ["REDSHIFT_HOST"],
-  "port": int(os.environ["REDSHIFT_PORT"]),
-  "database": os.environ["REDSHIFT_DATABASE"],
-  "user": os.environ["REDSHIFT_USER"],
-  "password": os.environ["REDSHIFT_PASSWORD"],
-  "timeout": 15,
-}
 
 POSTGRES_CONFIG = {
   "host": os.environ["POSTGRES_HOST"],
@@ -101,24 +92,18 @@ def check_containers() -> tuple[bool, str]:
   return True, f"All {len(EXPECTED_CONTAINERS)} containers running."
 
 
-def check_data_freshness() -> tuple[bool, str]:
-  """Latest `stations.fetched_at` in Redshift must be within STALENESS_THRESHOLD_MINUTES."""
+def check_data_freshness(pg_conn) -> tuple[bool, str]:
+  """Postgres load_pointer.last_loaded_fetched_at must be within STALENESS_THRESHOLD_MINUTES."""
   try:
-    conn = redshift_connector.connect(**REDSHIFT_CONFIG)
+    cur = pg_conn.cursor()
+    cur.execute("SELECT last_loaded_fetched_at FROM load_pointer;")
+    row = cur.fetchone()
+    cur.close()
   except Exception as exc:  # noqa: BLE001
-    return False, f"Could not connect to Redshift: {exc}"
-
-  try:
-    cursor = conn.cursor()
-    cursor.execute("SELECT MAX(fetched_at) FROM stations;")
-    row = cursor.fetchone()
-  except Exception as exc:  # noqa: BLE001
-    return False, f"Redshift query failed: {exc}"
-  finally:
-    conn.close()
+    return False, f"Could not read load_pointer from Postgres: {exc}"
 
   if not row or row[0] is None:
-    return False, "No station data found in Redshift."
+    return False, "No load_pointer value found in Postgres."
 
   latest = row[0]
   if latest.tzinfo is None:
@@ -126,8 +111,8 @@ def check_data_freshness() -> tuple[bool, str]:
   age_minutes = (datetime.now(timezone.utc) - latest).total_seconds() / 60
 
   if age_minutes > STALENESS_THRESHOLD_MINUTES:
-    return False, f"Latest data is {age_minutes:.0f} min old (threshold: {STALENESS_THRESHOLD_MINUTES} min)."
-  return True, f"Latest data is {age_minutes:.0f} min old."
+    return False, f"Last loaded data is {age_minutes:.0f} min old (threshold: {STALENESS_THRESHOLD_MINUTES} min)."
+  return True, f"Last loaded data is {age_minutes:.0f} min old."
 
 
 def check_memory() -> tuple[bool, str]:
@@ -290,7 +275,10 @@ def main() -> None:
 
   try:
     for check_name, label, check_fn in CHECKS:
-      healthy, detail = check_fn()
+      if check_name == "data_freshness":
+        healthy, detail = check_fn(pg_conn)
+      else:
+        healthy, detail = check_fn()
       print(f"[{check_name}] healthy={healthy} detail={detail}")
       evaluate_and_alert(pg_conn, check_name, label, healthy, detail)
   finally:

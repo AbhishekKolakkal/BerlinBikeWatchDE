@@ -11,7 +11,10 @@
 
 
 ### Fixes
-1. Need to add try/except for network error handling if there is any hiccup while polling the api
+1. Need to add try/except for network error handling if there is any hiccup while polling the api - done
+2. Dashboard query is taking too long to load
+3. AUTO COPY TO REDSHIFT - something to be done
+4. The cost is alot when it comes to redshift which I need to do something about it.
 
 
 

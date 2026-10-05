@@ -15,3 +15,6 @@ kafka3/
 # Local raw data landing zone / test dumps
 data/
 nextbike_sample.json
+
+# Log output (grows continuously, not source)
+logs/

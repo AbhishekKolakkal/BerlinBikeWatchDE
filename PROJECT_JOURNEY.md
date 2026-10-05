@@ -262,3 +262,55 @@ Both incidents above shared the same root enabling factor: **nothing told me a s
 - Notification via a simple webhook (Telegram or Discord) — no new infrastructure beyond the script itself and a free bot/webhook.
 
 **Deliberately deferred:** a full Prometheus/Grafana/Alertmanager stack was considered and explicitly set aside for now, using the same reasoning applied earlier to Spark, dbt, and Snowflake — it's genuinely more powerful, but disproportionate to the current scale and would compete for focus with the still-open event-correlation phases (§8) rather than strengthening the core project narrative. It remains a reasonable future upgrade if the project's monitoring needs outgrow the simple version.
+
+## 12. Incident: Kafka OOM (Root Cause Traced to Sept 26) and Building Real Alerting
+
+This session started with what looked like a fresh Kafka failure and ended with tracing it back four days, fixing the actual root cause, and closing the gap that let all of this project's incidents so far go unnoticed for hours to days: a working, tested alerting system.
+
+### 12.1 The symptom
+
+The producer began failing with `Failed to resolve 'kafka1:9092': Temporary failure in name resolution`. Checking `docker ps -a` showed `kafka1` itself was `Exited (137)` — the container wasn't running at all, so there was nothing for Docker's internal DNS to resolve.
+
+### 12.2 A stuck restart, and a real distinction worth recording
+
+Restarting `kafka1` did not immediately fix it. Its logs showed it stuck mid-startup, repeatedly loading `__consumer_offsets` partition metadata (`GroupMetadataManager`) with no further progress — confirmed genuinely hung (not just slow) by watching `docker logs -f` produce no new lines for over a minute, and `docker stats` showing near-zero CPU activity. This is a different failure mode from every previous incident: not a network timeout, not a dropped connection, but startup-time recovery from an inconsistent on-disk state.
+
+### 12.3 Finding the real root cause — four days back
+
+Rather than treating the hang as a one-off to just restart past, `docker events --since ... --filter container=kafka1` was used to look at `kafka1`'s history over the preceding days. This revealed the actual root cause:
+```
+2026-09-26T00:28:45 container oom
+2026-09-26T00:28:48 container die (exitCode=137)
+```
+**`kafka1` had been OOM-killed by the Linux kernel four days earlier**, on Sept 26 — not today. It had been running ever since in a state carrying inconsistent on-disk metadata from that ungraceful kill, and only surfaced as a visible failure when it happened to restart today (as part of applying the `restart: unless-stopped` / `stop_grace_period` fixes from the previous incident's addendum, §10.4).
+
+This is the same class of "silent gap" this project has now hit three times: a real problem existed for days without any signal, only discovered by chance while investigating something else.
+
+### 12.4 Diagnosing the actual memory consumer
+
+`free -h` showed only ~2.5 GiB available out of 7.8 GiB total, but summing `docker stats` across every visible container accounted for only ~1.8 GiB — a large, unexplained gap. Rather than guess, `kafka-cluster-ui` (the Kafka UI monitoring tool) was restarted in isolation as a targeted test, since it had separately been observed running at a sustained 391% CPU. Available memory jumped from 2.5 GiB to 5.1 GiB immediately after that single restart — direct, practical confirmation that Kafka UI's Java process, left with no memory ceiling, had grown to consume roughly 2.6 GiB on its own. This is almost certainly the same underlying cause as the Sept 26 OOM kill: an unbounded JVM heap slowly starving the host until the kernel killed something (in this case, `kafka1` — not necessarily the actual offender, just whatever the kernel's OOM scoring picked).
+
+### 12.5 The fix — memory limits across the whole stack
+
+`mem_limit` was added to every service in `docker-compose.yaml`, sized to what `docker stats` showed each one actually using, with headroom (`kafka1: 1536m`, `kafka-cluster-ui: 512m`, `postgres: 512m`, each app container: `256m`, `dashboard: 512m` — totaling well under the host's 7.8 GiB even alongside the unrelated `n8n`/`Traefik`/`Gotenberg` containers sharing the same server). For `kafka-cluster-ui` specifically, `JAVA_OPTS: "-Xmx384m"` was added alongside the container-level limit — a container memory cap alone does not stop a JVM from trying to grow its heap past that limit and getting killed anyway; the JVM's own internal ceiling has to be set explicitly too.
+
+This is now the third distinct root cause found in this project's incidents (API timeout → S3 timeout error handling; dropped DB connection → reconnect logic; unbounded JVM memory → explicit resource limits), each requiring genuinely different diagnostic approaches and genuinely different fixes — not the same bug recurring in different clothes.
+
+### 12.6 Building real alerting — closing the actual gap
+
+Every incident so far shared one root enabling factor: nothing notified anyone when something broke. This was addressed directly, not deferred further:
+
+**Design decisions, made deliberately:**
+- A Telegram bot for notifications, chosen over Discord for reliable phone push delivery.
+- A single-shot script (`scripts/check_pipeline_health.py`), invoked repeatedly by **cron** rather than built as a new long-running service — reasoning explicitly: a long-running alerting container could itself crash or be OOM-killed (the exact failure mode just diagnosed), silently taking down the alerting with it. A cron-invoked one-shot has no persistent process that can fail *as* alerting; a missed run simply means the next scheduled run tries again.
+- Three checks: container health (`docker ps`, via a read-only mounted Docker socket, since the script itself runs as a container using the existing `bbw-app` image), data freshness (`MAX(fetched_at)` in Redshift, threshold 15 minutes), and memory pressure (`/proc/meminfo`, threshold 1 GiB) — each one mapped directly to a real incident already lived through.
+- State tracking in a small Postgres table (`alert_state`, in the existing `bbw_metadata` database) to avoid alert spam: one message on failure, one on recovery, and a reminder capped at once per hour while a check remains unhealthy — not a message every 5-minute tick.
+
+**Real bugs found and fixed during testing, not just assumed correct:**
+- `POSTGRES_HOST=localhost` in `.env` resolved to the health-check container itself, not the actual `bbw-postgres` container — the same class of Docker networking issue debugged repeatedly throughout this project. Fixed with an explicit `-e POSTGRES_HOST=bbw-postgres` override on the `docker run` invocation, mirroring the same override already present for the other services in `docker-compose.yaml`.
+
+**Verified, not just written:** the failure path was tested by deliberately stopping `bbw-loader` and confirming a real Telegram alert arrived (`"bbw-loader is not running (not found)"`); the recovery path was tested by restarting it and confirming a distinct recovery message arrived, correctly referencing the prior failure detail. Only after both directions were proven working by hand was the script wired into cron (`*/5 * * * *`), running unattended via the same ECR-hosted `bbw-app` image as the rest of the pipeline.
+
+### 12.7 What this closes out
+
+Given today's timeline — Sept 8 (1h46m unnoticed), Sept 18 (5 days unnoticed), Sept 26 (4 days unnoticed) — this system, running from today forward, would have caught every one of those within 5 minutes instead of hours to days. This is the natural, necessary completion of the reliability work started with `restart: unless-stopped` and `try/except` fixes earlier in the project: those fixes let the pipeline recover automatically; this one ensures a human finds out promptly when automatic recovery isn't enough.

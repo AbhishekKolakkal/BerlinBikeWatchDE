@@ -3,12 +3,16 @@ version: '3.8'
 networks:
   kafka-net:
     driver: bridge
+  n8n-compose_default:
+    external: true
 
 services:
   kafka1:
     image: confluentinc/cp-kafka:7.8.0
     hostname: kafka1
     container_name: kafka1
+    restart: unless-stopped
+    stop_grace_period: 60s
     ports:
       - "9092:9092"
       - "9093:9093"
@@ -36,6 +40,7 @@ services:
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: kafka-cluster-ui
+    restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
@@ -49,6 +54,7 @@ services:
   postgres:
     image: postgres:16
     container_name: bbw-postgres
+    restart: unless-stopped
     ports:
       - "5432:5432"
     environment:
@@ -64,8 +70,10 @@ services:
     image: 477056345538.dkr.ecr.eu-central-1.amazonaws.com/bbw-app:latest
     container_name: bbw-producer
     env_file: .env
+    restart: unless-stopped
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka1:9092
+      PYTHONUNBUFFERED: "1"
     command: uv run producers/produce_nextbike.py
     depends_on:
       - kafka1
@@ -76,8 +84,10 @@ services:
     image: 477056345538.dkr.ecr.eu-central-1.amazonaws.com/bbw-app:latest
     container_name: bbw-consumer
     env_file: .env
+    restart: unless-stopped
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka1:9092
+      PYTHONUNBUFFERED: "1"
     command: uv run consumers/consume_nextbike.py
     depends_on:
       - kafka1
@@ -88,20 +98,30 @@ services:
     image: 477056345538.dkr.ecr.eu-central-1.amazonaws.com/bbw-app:latest
     container_name: bbw-loader
     env_file: .env
+    restart: unless-stopped
     environment:
       POSTGRES_HOST: bbw-postgres
+      PYTHONUNBUFFERED: "1"
     command: uv run loaders/load_to_redshift.py
     depends_on:
       - postgres
     networks:
       - kafka-net
 
-  streamlit-frontend:
+  dashboard:
     image: 477056345538.dkr.ecr.eu-central-1.amazonaws.com/bbw-app:latest
-    container_name: streamlit-frontend
+    container_name: bbw-dashboard
     env_file: .env
-    ports:
-      - "8501:8501"
+    restart: unless-stopped
     command: uv run streamlit run dashboard/app.py --server.address 0.0.0.0 --server.port 8501 --server.headless true
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.bbw.rule=Host(`bbw.empathyminds.club`)
+      - traefik.http.routers.bbw.tls=true
+      - traefik.http.routers.bbw.entrypoints=web,websecure
+      - traefik.http.routers.bbw.tls.certresolver=mytlschallenge
+      - traefik.http.services.bbw.loadbalancer.server.port=8501
+      - traefik.docker.network=n8n-compose_default
     networks:
       - kafka-net
+      - n8n-compose_default

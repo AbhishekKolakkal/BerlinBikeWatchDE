@@ -389,3 +389,60 @@ While verifying this fix, Telegram alerting itself was found to be silently brok
 14.5 What this adds to the project's story
 
 This is the fourth genuinely distinct root cause found across this project's incidents — API timeout, dropped DB connection, unbounded JVM memory, and now a billing-model mismatch where the monitoring system itself was the cost driver it was built to help control. It's a useful, slightly uncomfortable lesson: the alerting system built in §12 to catch failures faster introduced a new failure mode of its own (cost, not downtime) that went unnoticed for an unknown period, precisely because nothing was watching spend the way everything else was watching uptime.
+
+
+15. Incident: Dashboard Taking 2 Minutes to Load (Oct 24)
+15.1 The symptom and initial fixes
+
+The dashboard was taking roughly 2 minutes to render. Diagnosis surfaced three separate, stacking causes, none of which were about query logic being wrong — all about how the queries were being run:
+
+The historical queries were scanning the full, ever-growing table. ANOMALIES_SQL, BUSIEST_SQL, and GAPS_SQL all ran LAG() OVER (PARTITION BY uid ORDER BY fetched_at) with no date bound at all — only DEAD_SQL had one. With stations at roughly 13–14 million rows by this point (growing ~1,048 rows every 5 minutes since early September), these three queries got measurably slower every single day, independent of anything else going on.
+Six queries ran sequentially, each opening its own fresh Redshift connection — six full connection handshakes plus six queries, one after another, before the page rendered anything.
+Nothing rendered until all six finished — the live map (tile 1), which needs zero Redshift access, was coded to run after the Redshift block, so even the parts of the page unrelated to Redshift sat blocked behind it.
+
+Fixes applied, via Claude Code: ANOMALIES_SQL/BUSIEST_SQL/GAPS_SQL bounded to a rolling 2-day window (including the JOIN subqueries, which were also unbounded); the live map moved to render before any Redshift call; all six queries consolidated into a single connection (run_all_redshift_queries) instead of six separate ones, with per-query error isolation preserved so one failing query doesn’t break the others.
+
+15.2 The real bottleneck — no sort key
+
+The above dropped load time from ~2 minutes to ~22 seconds — real progress, but not proportional to what the date-bounding should have achieved. Checking sys_query_history directly confirmed why: LATEST_FETCH_SQL — a bare SELECT MAX(fetched_at) FROM stations with no filter at all — was taking 5.7 seconds, which makes no sense for that query unless Redshift has no efficient way to find the max without scanning actual data blocks. ANOMALIES_SQL (7.4s) and BUSIEST_SQL (3.8s), despite their new date bounds, were barely faster than before bounding — while DEAD_SQL, structurally similar but pre-existing, ran in 109ms.
+
+Root cause: stations had no sort key on fetched_at. Confirmed via:
+
+sql
+SELECT "table", sortkey1, unsorted FROM svv_table_info WHERE "table" = 'stations';
+
+Without a sort key, a WHERE fetched_at >= ... clause reduces the rows returned but not the rows scanned — Redshift still had to read the full table and filter after the fact, which is why doubling the window from DEAD_SQL’s 1 day to ANOMALIES_SQL’s 2 days made things dramatically worse rather than proportionally worse.
+
+Fix:
+
+sql
+ALTER TABLE stations ALTER SORTKEY (fetched_at);
+ANALYZE stations;
+
+(Note: ALTER SORTKEY, not ADD SORTKEY — the latter is only valid at CREATE TABLE time, a mistake made and corrected during this session.) ALTER TABLE ... ALTER SORTKEY physically reorders the data as part of the command itself, so no separate VACUUM SORT ONLY was needed. Confirmed afterward: sortkey1: fetched_at, unsorted: 0. Dashboard load time dropped to genuinely fast immediately after.
+
+15.3 What this adds to the project’s story
+
+This is now a fifth genuinely distinct root cause found in this project’s incidents — API timeout, dropped DB connection, unbounded JVM memory, a billing-model mismatch, and now a missing physical table property masquerading as a query-logic problem. The date-bounding fix from earlier in the day was the correct idea but produced almost none of its expected benefit until the underlying physical storage issue was found — a reminder that a query optimization can look like it failed when the real bottleneck is one layer below the SQL itself.
+
+16. Decision: Moving the Loader from 5-Minute to Daily Batching (Oct 24)
+
+Separately from the dashboard fix, the recurring tension between “real-time” and “Redshift Serverless cost” came to a head again: the loader (and its 5-minute COPY cadence) was stopped outright, since every 5-minute wake-up — independent of query cost — was keeping the serverless warehouse continuously active rather than letting it auto-pause.
+
+16.1 Alternatives considered, honestly weighed
+
+Before committing to a fix, real alternatives were evaluated rather than just tuning Redshift’s cadence:
+
+Amazon Athena (pay-per-TB-scanned, zero idle cost, no warehouse to keep warm) — strong fit for low, bursty access patterns, but would mean removing the loader/load_pointer architecture entirely and re-architecting around S3-direct querying.
+DuckDB embedded in the dashboard — genuinely $0 beyond S3 storage, same SQL capabilities, but loses the “AWS warehouse” portfolio narrative.
+Apache Flink — correctly identified as solving computation, not storage/serving; still needs somewhere to write results. Considered against the simpler alternative of computing anomaly logic incrementally inside the existing consumer and writing to Postgres (already-paid-for, zero marginal cost, no idle-billing mechanism at all) — the simpler option was preferred, consistent with this project’s established pattern of not reaching for a bigger tool than the current scale justifies (same reasoning previously applied to Spark, dbt, Snowflake).
+Daily batched loading into Redshift (chosen for now) — keeps the existing, already-proven architecture (Kafka → S3 → pointer-based loader → Redshift → dashboard) intact, trades real-time freshness for a large, direct cost reduction.
+16.2 The chosen design and its explicit trade-off
+
+Producer and consumer continue polling/writing to S3 every 5 minutes, unchanged — only the loader’s cadence changes, from every 5 minutes to once daily. This was a deliberate, acknowledged trade-off against the alerting system built in §12: STALENESS_THRESHOLD_MINUTES has to widen from 15 minutes to roughly 33 hours to avoid constant false alarms between daily loads, which means a loader that’s running but silently stuck (as opposed to crashed) could now go unnoticed for up to a day, versus 15 minutes today. container_health and memory_pressure stay on their existing 5-minute cron cadence regardless — since those cost nothing and don’t touch Redshift — so a loader that actually crashes is still caught within minutes via restart: unless-stopped and container-status alerting, same as before. Only the narrower “running but stuck” failure mode is the accepted gap.
+
+Three concrete changes specified for implementation (handed to Claude Code, not yet confirmed complete as of this writing):
+
+Loader (load_to_redshift.py): POLL_INTERVAL_SECONDS → 86400; the per-file COPY loop (now facing ~288 accumulated files per run instead of ~1) rewritten to build and upload a Redshift manifest JSON listing all new S3 keys, then run a single manifest-based COPY instead of one COPY per file — Redshift’s own guidance for batch-loading many files at once.
+Health check (check_pipeline_health.py): STALENESS_THRESHOLD_MINUTES → ~2000 (roughly 33 hours), with buffer for normal timing variance in when the daily run fires.
+Dashboard (app.py): confirmed no change needed — the existing RECENT_WINDOW = "2 days" already comfortably covers a full daily batch plus buffer.

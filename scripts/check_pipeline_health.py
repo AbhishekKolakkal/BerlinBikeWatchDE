@@ -43,7 +43,7 @@ EXPECTED_CONTAINERS = [
   "kafka1", "bbw-postgres", "bbw-producer", "bbw-consumer", "bbw-loader", "bbw-dashboard",
 ]
 
-STALENESS_THRESHOLD_MINUTES = 15   # pipeline polls every 5 min -> 3 missed polls
+STALENESS_THRESHOLD_MINUTES = 2000  # loader now runs once/day (~33h buffer); container/memory checks below are unaffected and keep their own 5-min cron cadence
 MEMORY_THRESHOLD_GIB = 1.0         # the Kafka-UI OOM incident dropped available memory to ~0
 REMINDER_INTERVAL_MINUTES = 60     # re-alert at most this often while a check stays unhealthy
 

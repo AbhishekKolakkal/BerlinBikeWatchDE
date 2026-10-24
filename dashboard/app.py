@@ -1,8 +1,15 @@
 """
 BerlinBikeWatch — Streamlit dashboard.
 
-Tile 1 (live map): direct NextBike API call, no Redshift.
-Tiles 2-4 (history): Redshift queries, cached to limit RPU-hour billing.
+Tile 1 (live map): direct NextBike API call, no Redshift. Renders first, so
+the page shows something useful immediately instead of waiting behind
+Redshift.
+Tiles 2-4 (history): all six Redshift queries run together through one
+cached, single-connection call (run_all_redshift_queries), each query's
+success/failure tracked independently so one bad query doesn't break the
+others. Three of them (anomalies, busiest, gaps) are bounded to a recent
+window, since `stations` grows ~1,048 rows every 5 minutes and keeps
+growing — an unbounded window-function scan over it gets slower every day.
 
 Selecting a row in any history table focuses that station on the map
 (Streamlit has no hover event, so this is a click, not a hover).
@@ -49,20 +56,38 @@ BERLIN_VIEW = pdk.ViewState(latitude=52.52, longitude=13.405, zoom=10.5)
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=300)
-def run_redshift_query(sql: str) -> pd.DataFrame:
-  """Open a short-lived Redshift connection, run one query, return a DataFrame.
+def run_all_redshift_queries(queries: dict[str, str]) -> dict[str, dict]:
+  """Open ONE Redshift connection, run every dashboard query against it, close once.
 
   Cached for 5 min (matching the pipeline poll interval) so page reloads and
-  widget interactions don't re-bill RPU-hours on every rerender.
+  widget interactions don't re-bill RPU-hours on every rerender. Returns
+  {name: {"df": DataFrame|None, "error": str|None}} — a failure on one query
+  is isolated to its own entry and doesn't abort the rest.
   """
-  conn = redshift_connector.connect(**REDSHIFT_CONFIG)
+  try:
+    conn = redshift_connector.connect(**REDSHIFT_CONFIG)
+  except Exception as exc:  # noqa: BLE001 - connection itself failed; every query fails the same way
+    return {name: {"df": None, "error": str(exc)} for name in queries}
+
+  results: dict[str, dict] = {}
   try:
     cursor = conn.cursor()
-    cursor.execute(sql)
-    df = cursor.fetch_dataframe()
-    return df if df is not None else pd.DataFrame()
+    for name, sql in queries.items():
+      try:
+        cursor.execute(sql)
+        df = cursor.fetch_dataframe()
+        results[name] = {"df": df if df is not None else pd.DataFrame(), "error": None}
+      except Exception as exc:  # noqa: BLE001 - this query's failure, not the others'
+        results[name] = {"df": None, "error": str(exc)}
   finally:
     conn.close()
+  return results
+
+
+def get_query_result(results: dict, name: str) -> tuple[pd.DataFrame | None, str | None]:
+  """Unpack one query's (df, error) out of run_all_redshift_queries()'s result dict."""
+  entry = results.get(name, {"df": None, "error": "Query not found"})
+  return entry["df"], entry["error"]
 
 
 @st.cache_data(ttl=60)
@@ -91,14 +116,6 @@ def fetch_live_stations() -> tuple[pd.DataFrame, datetime]:
   return pd.DataFrame(rows), requested_at
 
 
-def try_query(sql: str) -> tuple[pd.DataFrame | None, str | None]:
-  """Run a cached Redshift query, returning (df, error_message)."""
-  try:
-    return run_redshift_query(sql), None
-  except Exception as exc:  # noqa: BLE001 - surfaced in the tile, page stays alive
-    return None, str(exc)
-
-
 def utc_to_berlin(series: pd.Series) -> pd.Series:
   """Timestamp column (UTC, tz-aware or naive) -> 'YYYY-MM-DD HH:MM:SS' in Berlin local time."""
   ts = pd.to_datetime(series, utc=True)
@@ -122,7 +139,14 @@ def humanize_age(dt_utc: datetime) -> str:
 # Queries (validated upstream — kept close to the originals)
 # ---------------------------------------------------------------------------
 
-ANOMALIES_SQL = """
+# `stations` grows ~1,048 rows every 5 min and keeps growing (13-14M+ rows as of
+# writing) -- an unbounded window-function scan over it gets slower every day.
+# These three are bounded to a recent window; DEAD_SQL already was, INTEGRITY_SQL
+# intentionally isn't (it's checking the whole table's health, and it's a plain
+# aggregate, not a window function, so it scales fine as-is).
+RECENT_WINDOW = "2 days"
+
+ANOMALIES_SQL = f"""
 WITH anomaly_detection AS (
     SELECT uid,
         bikes_available_to_rent,
@@ -131,6 +155,7 @@ WITH anomaly_detection AS (
         LAG(fetched_at) OVER (PARTITION BY uid ORDER BY fetched_at) AS previous_fetched_at,
         EXTRACT(EPOCH FROM (fetched_at - LAG(fetched_at) OVER (PARTITION BY uid ORDER BY fetched_at))) / 60 AS gap_minutes
     FROM stations
+    WHERE fetched_at >= GETDATE() - INTERVAL '{RECENT_WINDOW}'
 )
 SELECT a.uid,
     s.name,
@@ -140,19 +165,20 @@ SELECT a.uid,
     a.fetched_at,
     a.gap_minutes
 FROM anomaly_detection a
-JOIN (SELECT DISTINCT uid, name FROM stations) s ON s.uid = a.uid
+JOIN (SELECT DISTINCT uid, name FROM stations WHERE fetched_at >= GETDATE() - INTERVAL '{RECENT_WINDOW}') s ON s.uid = a.uid
 WHERE a.previous_bikes_avail_to_rent - a.bikes_available_to_rent >= 3
 AND a.gap_minutes <= 15
 ORDER BY a.fetched_at DESC
 LIMIT 50;
 """
 
-BUSIEST_SQL = """
+BUSIEST_SQL = f"""
 WITH bike_history AS (
     SELECT uid, bikes,
         LAG(bikes) OVER (PARTITION BY uid ORDER BY fetched_at) AS previous_bikes,
         fetched_at
     FROM stations
+    WHERE fetched_at >= GETDATE() - INTERVAL '{RECENT_WINDOW}'
 ),
 changed_check AS (
     SELECT uid, bikes, previous_bikes, fetched_at,
@@ -166,7 +192,7 @@ activity_summary AS (
 )
 SELECT act_s.uid, s.name, act_s.change_count
 FROM activity_summary act_s
-JOIN (SELECT DISTINCT uid, name FROM stations) s ON s.uid = act_s.uid
+JOIN (SELECT DISTINCT uid, name FROM stations WHERE fetched_at >= GETDATE() - INTERVAL '{RECENT_WINDOW}') s ON s.uid = act_s.uid
 WHERE act_s.status = 'changed'
 ORDER BY act_s.change_count DESC
 LIMIT 20;
@@ -209,12 +235,15 @@ SELECT
 FROM stations;
 """
 
-GAPS_SQL = """
+GAPS_SQL = f"""
 WITH poll_gaps AS (
     SELECT
         fetched_at,
         LAG(fetched_at) OVER (ORDER BY fetched_at) AS previous_fetched_at
-    FROM (SELECT DISTINCT fetched_at FROM stations) t
+    FROM (
+        SELECT DISTINCT fetched_at FROM stations
+        WHERE fetched_at >= GETDATE() - INTERVAL '{RECENT_WINDOW}'
+    ) t
 )
 SELECT
     previous_fetched_at,
@@ -294,31 +323,9 @@ with link_col:
 
 focused = st.session_state.get("focused")
 
-latest_df, latest_err = try_query(LATEST_FETCH_SQL)
-anomalies, anomalies_err = try_query(ANOMALIES_SQL)
-busiest, busiest_err = try_query(BUSIEST_SQL)
-dead, dead_err = try_query(DEAD_SQL)
-integrity_df, integrity_err = try_query(INTEGRITY_SQL)
-gaps, gaps_err = try_query(GAPS_SQL)
-
-if latest_err:
-  st.caption(f"⚠️ Warehouse freshness unknown: {latest_err}")
-elif latest_df is not None and not latest_df.empty and pd.notna(latest_df.iloc[0, 0]):
-  latest_utc = pd.to_datetime(latest_df.iloc[0, 0], utc=True).to_pydatetime()
-  latest_berlin = latest_utc.astimezone(BERLIN_TZ)
-  st.caption(
-    f"Warehouse data current to {latest_berlin:%Y-%m-%d %H:%M:%S} (Berlin) · "
-    f"{humanize_age(latest_utc)}"
-  )
-else:
-  st.caption("Warehouse has no station data yet.")
-
-if anomalies is not None and not anomalies.empty:
-  anomalies = anomalies.assign(
-    fetched_at_berlin=utc_to_berlin(anomalies["fetched_at"])
-  )
-
-# --- Tile 1: live station map ----------------------------------------------
+# --- Tile 1: live station map -----------------------------------------------
+# Renders before any Redshift query runs, so the page shows something useful
+# within a second even while the Redshift-backed tabs below are still loading.
 st.subheader("Live station map")
 
 try:
@@ -398,6 +405,40 @@ except Exception as exc:  # noqa: BLE001 - surface any failure in the tile, keep
   st.error(f"Could not load live NextBike data: {exc}")
 
 st.divider()
+
+# --- Tiles 2-4 data: one connection, all six Redshift queries ---------------
+query_results = run_all_redshift_queries({
+  "latest": LATEST_FETCH_SQL,
+  "anomalies": ANOMALIES_SQL,
+  "busiest": BUSIEST_SQL,
+  "dead": DEAD_SQL,
+  "integrity": INTEGRITY_SQL,
+  "gaps": GAPS_SQL,
+})
+latest_df, latest_err = get_query_result(query_results, "latest")
+anomalies, anomalies_err = get_query_result(query_results, "anomalies")
+busiest, busiest_err = get_query_result(query_results, "busiest")
+dead, dead_err = get_query_result(query_results, "dead")
+integrity_df, integrity_err = get_query_result(query_results, "integrity")
+gaps, gaps_err = get_query_result(query_results, "gaps")
+
+if latest_err:
+  st.caption(f"⚠️ Warehouse freshness unknown: {latest_err}")
+elif latest_df is not None and not latest_df.empty and pd.notna(latest_df.iloc[0, 0]):
+  latest_utc = pd.to_datetime(latest_df.iloc[0, 0], utc=True).to_pydatetime()
+  latest_berlin = latest_utc.astimezone(BERLIN_TZ)
+  st.caption(
+    f"Warehouse data current to {latest_berlin:%Y-%m-%d %H:%M:%S} (Berlin) · "
+    f"{humanize_age(latest_utc)}"
+  )
+else:
+  st.caption("Warehouse has no station data yet.")
+
+if anomalies is not None and not anomalies.empty:
+  anomalies = anomalies.assign(
+    fetched_at_berlin=utc_to_berlin(anomalies["fetched_at"])
+  )
+
 st.caption("Click a row in any table below to focus that station on the map.")
 
 # --- Tiles 2-4: history from Redshift -------------------------------------
@@ -421,7 +462,7 @@ with tab_anom:
     )
 
 with tab_busy:
-  st.caption("Stations ranked by how many polls recorded a change in bike count.")
+  st.caption(f"Stations ranked by how many polls recorded a change in bike count, over the last {RECENT_WINDOW}.")
   if busiest_err:
     st.error(f"Redshift query failed: {busiest_err}")
   elif busiest.empty:
@@ -476,8 +517,8 @@ with tab_health:
   st.divider()
   st.subheader("Uptime & gap history")
   st.caption(
-    "Gaps above ~6 minutes indicate the pipeline was not actively polling (expected interval "
-    "is 5 minutes). These are shown transparently, not hidden."
+    f"Last {RECENT_WINDOW}. Gaps above ~6 minutes indicate the pipeline was not actively polling "
+    f"(expected interval is 5 minutes). These are shown transparently, not hidden."
   )
   if gaps_err:
     st.error(f"Redshift query failed: {gaps_err}")
